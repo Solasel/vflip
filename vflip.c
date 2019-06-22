@@ -10,6 +10,10 @@
 /* Set this flag to see (large) log output. */
 #define LOG 0
 
+/* Maximum depth of tree search. Larger makes better decisions, but
+   runtime is exponential wrt. this argument. */
+#define MAX_DEPTH 4
+
 /* Bitmap corresponding to a full domain for a variable. */
 #define ALL_VALS (15U)
 
@@ -44,10 +48,6 @@
 
 /* Returns the probability of variable v having value x as stored in p. */
 #define PROB(p, v, x) (p[4 * (v) + (x)])
-
-/* Maximum depth of tree search. Larger makes better decisions, but
-   runtime is exponential wrt. this argument. */
-#define MAX_DEPTH 4
 
 /* Macro for the evaluation function so we can easily change it. */
 #define EVAL(b, m) score(b, m)
@@ -178,6 +178,7 @@ static void incorp_dom(struct board *b, int var, uint32_t *c);
 static int ll_append(int *s, struct soln_elem **last);
 static int score(struct board *b, bool *mask);
 static void print_assigns(struct board *b);
+static void print_prompt(struct board *b, int x);
 static void print_error(enum errs code);
 
 #if LOG
@@ -202,18 +203,24 @@ int main()
 	int cv[] = {4, 4, 4, 5, 4};
 
 	/* 4-rooks. Quitting is advisable
-	   after clicking the first tile. */
+	   after clicking the known 1 tile. */
 	int rs[] = {2, 2, 2, 2, 1};
 	int rv[] = {4, 4, 4, 4, 4};
 	int cs[] = {2, 2, 2, 2, 1};
 	int cv[] = {4, 4, 4, 4, 4};
+
+	/* Same as above, but since our
+	   beginning score is 0 it's worth
+	   trying a tile. */
+	int rs[] = {2, 2, 2, 2, 0};
+	int rv[] = {4, 4, 4, 4, 5};
+	int cs[] = {2, 2, 2, 2, 0};
+	int cv[] = {4, 4, 4, 4, 5};
 #endif
-	/* 4-rooks. Quitting is advisable
-	   after clicking the first tile. */
-	int rs[] = {2, 2, 2, 2, 1};
-	int rv[] = {4, 4, 4, 4, 4};
-	int cs[] = {2, 2, 2, 2, 1};
-	int cv[] = {4, 4, 4, 4, 4};
+	int rs[] = {4, 5, 3, 7, 7};
+	int rv[] = {2, 2, 4, 1, 1};
+	int cs[] = {2, 7, 5, 8, 4};
+	int cv[] = {3, 1, 2, 1, 3};
 
 	init_board(b, rs, rv, cs, cv);
 
@@ -506,7 +513,7 @@ static bool pfree_doms(struct board *b)
 		return false;
 
 	/* Otherwise, prompt the user for the value of the safe variable. */
-	print_assigns(b);
+	print_prompt(b, free_var);
 	printf("Variable %d is safe. What is its value? It's one of: ", free_var);
 
 	dom = doms[free_var];
@@ -662,7 +669,7 @@ static bool pfree_mask(struct board *b)
 
 	/* Otherwise, prompt the user for the value of the safe variable. */
 	printf("\n##################################\n");
-	print_assigns(b);
+	print_prompt(b, free_var);
 	printf("Variable %d is safe. What is its value? It's one of: ", free_var);
 
 	if (PROB(probs, free_var, 1) > 0) {
@@ -714,7 +721,7 @@ static bool pfree_mask(struct board *b)
 static int pbest_act(struct board *b, bool *rd)
 {
 	int errno, i, input, best_a, *asgmt = b->assigns;
-	double best = -1.0, cand, p_one, p_two, p_three, sub_val, *probs = b->probs;
+	double best = -1.0, best_pzero = 1.1, cand, p_one, p_two, p_three, sub_val, *probs = b->probs;
 	uint32_t dom = 0;
 #if LOG
 	int j;
@@ -739,7 +746,7 @@ static int pbest_act(struct board *b, bool *rd)
 		if (asgmt[i] != -1)
 			continue;
 #if LOG
-		printf("Checking variable %d.\n\n", i);
+		printf("Assigning var %d.\n\n", i);
 #endif
 		/* Otherwise, calculate its expected value. */
 		cand = 0;
@@ -783,10 +790,12 @@ static int pbest_act(struct board *b, bool *rd)
 		}
 #if LOG
 		q_vals[i] = cand;
+		printf("Value of clicking on %d at the root is %01.02f.\n\n", i, cand);
 #endif
 		/* If it's better, set this as the best action so far. */
-		if (cand > best) {
+		if (cand > best || (cand == best && PROB(probs, i, 0) < best_pzero)) {
 			best = cand;
+			best_pzero = PROB(probs, i, 0);
 			best_a = i;
 		}
 	}
@@ -802,13 +811,13 @@ static int pbest_act(struct board *b, bool *rd)
 	   particular tile, prompt the user to quit and end the game. */
 	if (score(b, b->mask) > best) {
 		print_assigns(b);
-		printf("It is not worthwhile to continue. Maximize your score with the above known tiles and quit the game.\n");
+		printf("It is not worthwhile to continue. Maximize your score with the above known tiles and quit the game.\n\n");
 		*rd = false;
 		return 0;
 	}
 
 	printf("\n##################################\n");
-	print_assigns(b);
+	print_prompt(b, best_a);
 	printf("The next best action is tile %d. What is its value? It is one of: ", best_a);
 
 	if (PROB(probs, best_a, 0) > 0) {
@@ -830,6 +839,8 @@ static int pbest_act(struct board *b, bool *rd)
 		dom = SET_BIT(dom, 3);
 		printf("3 ");
 	}
+
+	printf("\nIt has a %01.02f%% chance to be a Voltorb.", 100 * PROB(probs, best_a, 0));
 
 	/* Prompts the user for the true value of the tile. */
 	printf("\nValue: ");
@@ -859,7 +870,7 @@ static int pbest_act(struct board *b, bool *rd)
 	if (input == 0) {
 		printf("\n##################################\n");
 		print_assigns(b);
-		printf("Sorry, you got unlucky. =( Game Over.\n");
+		printf("Sorry, you got unlucky. =( Game Over.\n\n");
 		*rd = false;
 		return 0;
 	}
@@ -1314,7 +1325,7 @@ static int tree_search(struct board *b, bool *m_in, int var, int val, int depth,
 #if LOG
 		for (_ = 0; _ < depth; _++)
 			printf("\t");
-		printf("Checking variable %d.\n\n", i);
+		printf("Assigning var %d.\n\n", i);
 #endif
 		/* Otherwise, calculate its expected value. */
 		cand = 0;
@@ -1481,14 +1492,13 @@ static int ll_append(int *s, struct soln_elem **last)
 	return 0;
 }
 
-/* Returns the max score obtainable with all known tiles of a
-   board b given a mask m. Since this is only called down the
-   line in the game theory tree, we can be sure that we know
-   at least one tile - our score is nonzero. */
+/* Returns the maximum score we can safely obtain on b knowing mask.
+   This is the score one would receive if they quit at this point. */
 static int score(struct board *b, bool *mask)
 {
 	int i, j, rv = 1, len = b->solns_len, *solns = b->solns;
 	uint32_t doms[25];
+	bool zero_score = true;
 
 	memset(doms, 0, 100);
 
@@ -1504,13 +1514,18 @@ static int score(struct board *b, bool *mask)
 	/* Now iterate over all the domains, and multiply
 	   any known vars into the total score. */
 	for (i = 0; i < 25; i++) {
-		if (doms[i] == 4U)
+		if (doms[i] == 2U) {
+			zero_score = false;
+		} else if (doms[i] == 4U) {
+			zero_score = false;
 			rv *= 2;
-		else if (doms[i] == 8U)
+		} else if (doms[i] == 8U) {
+			zero_score = false;
 			rv *= 3;
+		}
 	}
 
-	return rv;
+	return zero_score ? 0 : rv;
 }
 
 /* Prints out a grid representation of the
@@ -1526,14 +1541,44 @@ static void print_assigns(struct board *b)
 		printf("\n");
 		for (j = 0; j < 5; j++) {
 			
-			/* Print out X's for unassigned vars, and
-			   ?'s for invalidly assigned vars. */
+			/* Print out "X"s for unassigned vars. */
 			if (asgmt[VAR(i, j)] == -1)
 				printf(" X ");
-			else if (asgmt[VAR(i, j)] <= 3)
-				printf(" %d ", asgmt[VAR(i, j)]);
 			else
+				printf(" %d ", asgmt[VAR(i, j)]);
+		}
+
+		printf("   %02d\n                  %d\n\n", rs[i], rv[i]);
+	}
+
+	printf("%02d %02d %02d %02d %02d\n %d  %d  %d  %d  %d\n\n",
+			cs[0], cs[1], cs[2], cs[3], cs[4],
+			cv[0], cv[1], cv[2], cv[3], cv[4]);
+}
+
+/* Does the same thing as print_assigns, but with a convenient
+   ? instead of an X for the given tile. */
+static void print_prompt(struct board *b, int x)
+{
+	int i, j, *asgmt = b->assigns, *rs = b->row_sums, *rv = b->row_volts,
+	    *cs = b->col_sums, *cv = b->col_volts;
+
+	printf("\nAssignments:\n\n");
+	for (i = 0; i < 5; i++) {
+
+		printf("\n");
+		for (j = 0; j < 5; j++) {
+
+			if (VAR(i, j) == x) {
 				printf(" ? ");
+				continue;
+			}
+			
+			/* Print out "X"s for unassigned vars. */
+			if (asgmt[VAR(i, j)] == -1)
+				printf(" X ");
+			else
+				printf(" %d ", asgmt[VAR(i, j)]);
 		}
 
 		printf("   %02d\n                  %d\n\n", rs[i], rv[i]);

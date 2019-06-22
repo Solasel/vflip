@@ -1,6 +1,7 @@
 /* TODO */
 /* Incorporate the value of the next game. This will
    require some info about expected winrates, etc. */
+/* Use the hash table to cache values. */
 #include <stdio.h>
 #include <stdbool.h>
 #include <string.h>
@@ -13,6 +14,9 @@
 /* Maximum depth of tree search. Larger makes better decisions, but
    runtime is exponential wrt. this argument. */
 #define MAX_DEPTH 4
+
+/* Number of buckets in the hash table used for caching results. */
+#define HT_BUCKETS 1024
 
 /* Bitmap corresponding to a full domain for a variable. */
 #define ALL_VALS (15U)
@@ -51,6 +55,8 @@
 
 /* Macro for the evaluation function so we can easily change it. */
 #define EVAL(b, m) score(b, m)
+
+#define HT_NOT_FOUND (-1.0)
 
 /* Error codes. */
 enum errs {
@@ -96,6 +102,19 @@ const uint32_t part_cons[96] = {
 struct soln_elem {
 	struct soln_elem *next;
 	int assigns[25];
+};
+
+/* A sentinel node for a bucket in the hash table. Contains
+   the head and the tail for fast iteration and appending. */
+struct htable_bucket {
+	struct cached_exp_val *head, *tail;
+};
+
+/* Linked list structure for caching expected values. */
+struct cached_exp_val {
+	struct cached_exp_val *next;
+	bool *key;
+	double val;
 };
 
 /* Models an instance of a game board. Constraints are stored in
@@ -151,6 +170,9 @@ struct board {
 	/* An array holding the probabilities of each
 	   value occuring in a certain variable. */
 	double probs[100];
+
+	/* Buckets for a hash table. */
+	struct htable_bucket htable[HT_BUCKETS];
 };
 
 /* Algorithmic functions. */
@@ -175,8 +197,12 @@ static bool is_solved(struct board *b, bool *mask);
 static int tree_search(struct board *b, bool *m_in, int var, int val, int depth, double *rd);
 static void assign_var_doms(struct board *b, int var, int val);
 static void incorp_dom(struct board *b, int var, uint32_t *c);
-static int ll_append(int *s, struct soln_elem **last);
+static int soln_ll_append(int *s, struct soln_elem **last);
 static int score(struct board *b, bool *mask);
+static double ht_get(struct board *b, bool *mask);
+static int ht_put(struct board *b, bool *mask, double exp_val);
+static uint32_t get_bucket(struct board *b, bool *mask);
+static void free_ht(struct board *b);
 static void print_assigns(struct board *b);
 static void print_prompt(struct board *b, int x);
 static void print_error(enum errs code);
@@ -1114,9 +1140,9 @@ static int r_enum_boards(struct board *b, struct soln_elem **last, int depth)
 	   valid solution to the constraints! Add it to the list. */
 	if (min_asgmt == -1) {
 		b->solns_len++;
-		errno = ll_append(asgmts, last);
+		errno = soln_ll_append(asgmts, last);
 
-		/* If an error occurs, report the depth that we failed to ll_append. */
+		/* If an error occurs, report the depth that we failed to soln_ll_append. */
 		if (errno)
 			printf("ERROR: Failed to append a solution to the LL of solutions at depth %d: %d.\n", depth, __LINE__);
 
@@ -1473,7 +1499,7 @@ static void incorp_dom(struct board *b, int var, uint32_t *c)
 
 /* Adds a new solution to the linked list whose tail
    is in **last. Spawns an error if allocation fails. */
-static int ll_append(int *s, struct soln_elem **last)
+static int soln_ll_append(int *s, struct soln_elem **last)
 {
 	struct soln_elem *new_soln = malloc(sizeof(struct soln_elem));
 	if (!new_soln) {
@@ -1526,6 +1552,102 @@ static int score(struct board *b, bool *mask)
 	}
 
 	return zero_score ? 0 : rv;
+}
+
+/* Search the bucket corresponding to a mask for it. If it's
+   found, return its value. If not, return HT_NOT_FOUND. */
+static double ht_get(struct board *b, bool *mask)
+{
+	int len = b->solns_len;
+	uint32_t bucket = get_bucket(b, mask);
+	struct cached_exp_val *curr;
+
+	/* Iterate through the correct bucket. If a key matches the mask,
+	   return its value. */
+	for (curr = b->htable[bucket].head; curr; curr = curr->next) {
+		if (memcmp(mask, curr->key, len * sizeof(bool) == 0))
+				return curr->val;
+	}
+
+	return HT_NOT_FOUND;
+}
+
+/* Puts a mask->exp_val pair into the correct bucket of the hash table. */
+static int ht_put(struct board *b, bool *mask, double exp_val)
+{
+	int len = b->solns_len;
+	struct htable_bucket sent = b->htable[get_bucket(b, mask)];
+	struct cached_exp_val *tail = sent.tail, *new = malloc(sizeof(struct cached_exp_val));
+
+	if (!new) {
+		printf("ERROR: Failed to malloc a new hashtable entry: %d.\n", __LINE__);
+		return OOM;
+	}
+
+	new->key = malloc(len * sizeof(bool));
+	if (!new->key) {
+		printf("ERROR: Failed to malloc a new hashtable entry: %d.\n", __LINE__);
+		free(new);
+		return OOM;
+	}
+
+	/* Populate the new entry. */
+	memcpy(new->key, mask, len * sizeof(bool));
+	new->val = exp_val;
+	new->next = NULL;
+
+	/* Update the tail of the bucket. */
+	sent.tail = new;
+
+	/* If the bucket is empty, initialize it. */
+	if (!tail) {
+		sent.head = new;
+		return 0;
+	}
+
+	/* Otherwise, append it to the LL. */
+	tail->next = new;
+	return 0;
+}
+
+/* Returns the index of the bucket corresponding to a mask. */
+static uint32_t get_bucket(struct board *b, bool *mask)
+{
+	int i, j, len = b->solns_len;
+	uint32_t rv = 5381U, temp;
+
+	for (i = 0; i < len - 8; i += 8) {
+		temp = (mask[i] ? 1U : 0) |
+			(mask[i + 1] ? 2U : 0) |
+			(mask[i + 2] ? 4U : 0) |
+			(mask[i + 3] ? 8U : 0) |
+			(mask[i + 4] ? 16U : 0) |
+			(mask[i + 5] ? 32U : 0) |
+			(mask[i + 6] ? 64U : 0) |
+			(mask[i + 7] ? 128U : 0);
+
+		rv = (rv << 5) + rv + temp;
+	}
+
+	temp = 0;
+	for (j = 0; i < len; i++, j++)
+		temp |= (mask[i] ? 1 << j : 0);
+
+	return ((rv << 5) + rv + temp) % HT_BUCKETS;
+}
+
+/* Frees the hash table from within a board. */
+static void free_ht(struct board *b)
+{
+	int i;
+	struct cached_exp_val *curr, *next;
+
+	for (i = 0; i < HT_BUCKETS; i++) {
+		for (curr = b->htable[i].head; curr; curr = next) {
+			next = curr->next;
+			free(curr);
+		}
+	}
 }
 
 /* Prints out a grid representation of the

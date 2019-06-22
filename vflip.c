@@ -193,9 +193,6 @@ int main()
 	int errno;
 	struct board _b;
 	struct board *b = &_b;
-	
-	/* TODO */
-	/* Input. */
 #if 0
 	/* 3-rooks. Close to maximum uncertainty
 	   where quitting is still unadvisable. */

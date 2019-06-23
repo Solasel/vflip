@@ -1,7 +1,6 @@
 /* TODO */
 /* Incorporate the value of the next game. This will
    require some info about expected winrates, etc. */
-/* Use the hash table to cache values. */
 #include <stdio.h>
 #include <stdbool.h>
 #include <string.h>
@@ -13,10 +12,11 @@
 
 /* Maximum depth of tree search. Larger makes better decisions, but
    runtime is exponential wrt. this argument. */
-#define MAX_DEPTH 4
+#define MAX_DEPTH (4)
 
-/* Number of buckets in the hash table used for caching results. */
-#define HT_BUCKETS 1024
+/* Number of buckets in the hash table used for caching results.
+   Useful values: 16381: a decently large prime. */
+#define HT_BUCKETS (16381)
 
 /* Bitmap corresponding to a full domain for a variable. */
 #define ALL_VALS (15U)
@@ -173,6 +173,9 @@ struct board {
 
 	/* Buckets for a hash table. */
 	struct htable_bucket htable[HT_BUCKETS];
+
+	/* Used to keep track of how many htable hits we get. */
+	int hits, elems, max_len, bucket_lens[HT_BUCKETS];
 };
 
 /* Algorithmic functions. */
@@ -201,8 +204,8 @@ static int soln_ll_append(int *s, struct soln_elem **last);
 static int score(struct board *b, bool *mask);
 static double ht_get(struct board *b, bool *mask);
 static int ht_put(struct board *b, bool *mask, double exp_val);
+static void ht_free(struct board *b);
 static uint32_t get_bucket(struct board *b, bool *mask);
-static void free_ht(struct board *b);
 static void print_assigns(struct board *b);
 static void print_prompt(struct board *b, int x);
 static void print_error(enum errs code);
@@ -242,21 +245,32 @@ int main()
 	int rv[] = {4, 4, 4, 4, 5};
 	int cs[] = {2, 2, 2, 2, 0};
 	int cv[] = {4, 4, 4, 4, 5};
-#endif
+
+	/* Computationally hard board. */
 	int rs[] = {4, 5, 3, 7, 7};
 	int rv[] = {2, 2, 4, 1, 1};
 	int cs[] = {2, 7, 5, 8, 4};
 	int cv[] = {3, 1, 2, 1, 3};
+#endif
+	/* Computationally hard board. */
+	int rs[] = {3, 4, 4, 7, 6};
+	int rv[] = {2, 2, 1, 1, 0};
+	int cs[] = {7, 5, 4, 5, 3};
+	int cv[] = {0, 0, 2, 1, 3};
 
 	init_board(b, rs, rv, cs, cv);
-
 	errno = solve_board(b);
 	if (errno) {
 		print_error(errno);
 		printf("\nBoard state at failure:\n");
 		print_assigns(b);
 	}
-
+#if LOG
+	printf("Total htable hits: %d.\n", b->hits);
+	printf("Total table entries: %d.\n", b->elems);
+	printf("Longest LL: %d entries.\n", b->max_len);
+#endif
+	ht_free(b);
 	free(b->mask);
 	free(b->solns);
 	return 0;
@@ -267,6 +281,7 @@ static void init_board(struct board *b, int *rs, int *rv, int *cs, int *cv)
 {
 	int i, *asgmt = b->assigns;
 	uint32_t *dom = b->domains;
+	struct htable_bucket *ht = b->htable;
 
 	/* Copy over all the constraints. */
 	memcpy(b->row_sums, rs, 5 * sizeof(int));
@@ -297,6 +312,16 @@ static void init_board(struct board *b, int *rs, int *rv, int *cs, int *cv)
 	b->solns_len = 0;
 	b->solns = NULL;
 	b->mask = NULL;
+
+	/* The hash table begins empty. */
+	for (i = 0; i < HT_BUCKETS; i++) {
+		ht[i].head = NULL;
+		ht[i].tail = NULL;
+	}
+
+	b->hits = 0;
+	b->max_len = 0;
+	memset(b->bucket_lens, 0, HT_BUCKETS * sizeof(int));
 }
 
 /* Solves a board that has been initialized.
@@ -1317,6 +1342,20 @@ static int tree_search(struct board *b, bool *m_in, int var, int val, int depth,
 		printf("\t");
 	printf("Trying %d -> %d:\n\n", val, var);
 #endif
+	/* Search through the hash table for a memoized value.
+	   If we get a hit, we can skip the recursive work. */
+	cand = ht_get(b, mask);
+	if (cand != HT_NOT_FOUND) {
+#if LOG
+		for (_ = 0; _ < depth; _++)
+			printf("\t");
+		printf("HT hit! Value = %01.02f.\n", cand);
+#endif
+		free(mask);
+		*rd = cand;
+		return 0;
+	}
+
 	/* If we're at the maximum depth or have an already
 	   solved board, just return the eval function.
 	   Otherwise, expand the search to one level deeper. */
@@ -1330,7 +1369,17 @@ static int tree_search(struct board *b, bool *m_in, int var, int val, int depth,
 		else
 			printf("Found a solution! Value of board is %01.02f.\n\n", (double) EVAL(b, mask));
 #endif
-		*rd = EVAL(b, mask);
+		rv = EVAL(b, mask);
+
+		/* Memoize the value for this mask in the hash table. */
+		errno = ht_put(b, mask, rv);
+		if (errno) {
+			printf("ERROR: Failed to insert a value into the hash table at depth %d: %d.\n", depth, __LINE__);
+			free(mask);
+			return errno;
+		}
+
+		*rd = rv;
 		free(mask);
 		return 0;
 	}
@@ -1410,7 +1459,14 @@ static int tree_search(struct board *b, bool *m_in, int var, int val, int depth,
 	if (score(b, mask) > rv)
 		rv = score(b, mask);
 
+	/* Memoize the value for this mask in the hash table. */
+	errno = ht_put(b, mask, rv);
 	free(mask);
+	if (errno) {
+		printf("ERROR: Failed to insert a value into the hash table at depth %d: %d.\n", depth, __LINE__);
+		return errno;
+	}
+
 	*rd = rv;
 	return 0;
 }
@@ -1558,15 +1614,24 @@ static int score(struct board *b, bool *mask)
    found, return its value. If not, return HT_NOT_FOUND. */
 static double ht_get(struct board *b, bool *mask)
 {
-	int len = b->solns_len;
-	uint32_t bucket = get_bucket(b, mask);
+	int i, len = b->solns_len;
 	struct cached_exp_val *curr;
+	bool *cached_mask;
 
 	/* Iterate through the correct bucket. If a key matches the mask,
 	   return its value. */
-	for (curr = b->htable[bucket].head; curr; curr = curr->next) {
-		if (memcmp(mask, curr->key, len * sizeof(bool) == 0))
-				return curr->val;
+	for (curr = b->htable[get_bucket(b, mask)].head; curr; curr = curr->next) {
+		cached_mask = curr->key;
+		for (i = 0; i < len; i++) {
+			if (mask[i] != cached_mask[i])
+				break;
+		}
+
+		/* If the mask matches the key, we have a hit! */
+		if (i == len) {
+			b->hits++;
+			return curr->val;
+		}
 	}
 
 	return HT_NOT_FOUND;
@@ -1576,8 +1641,9 @@ static double ht_get(struct board *b, bool *mask)
 static int ht_put(struct board *b, bool *mask, double exp_val)
 {
 	int len = b->solns_len;
-	struct htable_bucket sent = b->htable[get_bucket(b, mask)];
-	struct cached_exp_val *tail = sent.tail, *new = malloc(sizeof(struct cached_exp_val));
+	uint32_t i = get_bucket(b, mask);
+	struct htable_bucket *sent = &(b->htable[i]);
+	struct cached_exp_val *tail = sent->tail, *new = malloc(sizeof(struct cached_exp_val));
 
 	if (!new) {
 		printf("ERROR: Failed to malloc a new hashtable entry: %d.\n", __LINE__);
@@ -1591,23 +1657,43 @@ static int ht_put(struct board *b, bool *mask, double exp_val)
 		return OOM;
 	}
 
+	/* Update our bookkeeping for lengths of lls. */
+	b->elems++;
+	if (++(b->bucket_lens[i]) > b->max_len)
+		b->max_len = b->bucket_lens[i];
+
 	/* Populate the new entry. */
 	memcpy(new->key, mask, len * sizeof(bool));
 	new->val = exp_val;
 	new->next = NULL;
 
 	/* Update the tail of the bucket. */
-	sent.tail = new;
+	sent->tail = new;
 
 	/* If the bucket is empty, initialize it. */
 	if (!tail) {
-		sent.head = new;
+		sent->head = new;
 		return 0;
 	}
 
 	/* Otherwise, append it to the LL. */
 	tail->next = new;
 	return 0;
+}
+
+/* Frees the hash table from within a board. */
+static void ht_free(struct board *b)
+{
+	int i;
+	struct cached_exp_val *curr, *next;
+
+	for (i = 0; i < HT_BUCKETS; i++) {
+		for (curr = b->htable[i].head; curr; curr = next) {
+			next = curr->next;
+			free(curr->key);
+			free(curr);
+		}
+	}
 }
 
 /* Returns the index of the bucket corresponding to a mask. */
@@ -1634,20 +1720,6 @@ static uint32_t get_bucket(struct board *b, bool *mask)
 		temp |= (mask[i] ? 1 << j : 0);
 
 	return ((rv << 5) + rv + temp) % HT_BUCKETS;
-}
-
-/* Frees the hash table from within a board. */
-static void free_ht(struct board *b)
-{
-	int i;
-	struct cached_exp_val *curr, *next;
-
-	for (i = 0; i < HT_BUCKETS; i++) {
-		for (curr = b->htable[i].head; curr; curr = next) {
-			next = curr->next;
-			free(curr);
-		}
-	}
 }
 
 /* Prints out a grid representation of the

@@ -8,7 +8,7 @@
 #include <stdlib.h>
 
 /* Set this flag to see (large) log output. */
-#define LOG 0
+#define LOG 1
 
 /* Maximum depth of tree search. Larger makes better decisions, but
    runtime is exponential wrt. this argument. */
@@ -45,7 +45,7 @@
 
 /* Gets the constraint corresponding to n variables which
    sum to s. See below for more info. */
-#define GET_PART_CONS(n, s) (part_cons[6 * (s) + (n)])
+#define GET_PART_CONS(n, s) (partition_constraints[6 * (s) + (n)])
 
 /* Returns the ith solution's vth variable as stored in s. */
 #define SOLN_ASGMT(s, i, v) (s[25 * (i) + (v)])
@@ -75,11 +75,11 @@ const int cardinality[16] = {
 	2, 3, 3, 4
 };
 
-/* Bitmaps corresponding to valid assignments of
-   vars given sum and num of vars. The map
-   corresponding to n vars summing to s is
-   at part_cons[6 * s + n], given by the macro above. */
-const uint32_t part_cons[96] = {
+/* Bitmaps corresponding to valid assignments of vars
+   given sum and num of vars. The map corresponding
+   to n vars summing to s is at partition_constraints[6 * s + n],
+   given by the macro above. */
+const uint32_t partition_constraints[96] = {
 	0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
 	0x0, 0x2, 0x0, 0x0, 0x0, 0x0,
 	0x0, 0x4, 0x2, 0x0, 0x0, 0x0,
@@ -99,20 +99,23 @@ const uint32_t part_cons[96] = {
 };
 
 /* Linked list structure holding a solution to a given board. */
-struct soln_elem {
-	struct soln_elem *next;
+struct soln_ll_node
+{
+	struct soln_ll_node *next;
 	int assigns[25];
 };
 
 /* A sentinel node for a bucket in the hash table. Contains
    the head and the tail for fast iteration and appending. */
-struct htable_bucket {
-	struct cached_exp_val *head, *tail;
+struct htable_bucket
+{
+	struct cached_qval *head, *tail;
 };
 
-/* Linked list structure for caching expected values. */
-struct cached_exp_val {
-	struct cached_exp_val *next;
+/* Linked list structure for caching Q-vals. */
+struct cached_qval
+{
+	struct cached_qval *next;
 	bool *key;
 	double val;
 };
@@ -125,8 +128,8 @@ struct cached_exp_val {
    all possible solutions to the constraints given what we know.
    As we gain more info, rather than re-alloc the array, we use
    mask to indicate which solutions are no longer valid. */
-struct board {
-
+struct board 
+{
 	/* Row/column constraints given by the board. */
 	int row_sums[5];
 	int row_volts[5];
@@ -152,8 +155,8 @@ struct board {
 
 	/* Has the partition constraint on a
 	   row/column been enforced or not? */
-	bool row_cons[5];
-	bool col_cons[5];
+	bool row_pcons[5];
+	bool col_pcons[5];
 
 	/* Has the row/column arc of this variable
 	   been enforced? */
@@ -173,9 +176,6 @@ struct board {
 
 	/* Buckets for a hash table. */
 	struct htable_bucket htable[HT_BUCKETS];
-
-	/* Used to keep track of how many htable hits we get. */
-	int hits, elems, max_len, bucket_lens[HT_BUCKETS];
 };
 
 /* Algorithmic functions. */
@@ -193,17 +193,17 @@ static int col_part_cons(struct board *b, int x, uint32_t *rd);
 static bool change_var_dom(struct board *b, int var, uint32_t dom);
 static bool check_row_arc(struct board *b, int var, int val);
 static bool check_col_arc(struct board *b, int var, int val);
-static int r_enum_boards(struct board *b, struct soln_elem **last, int depth);
+static int r_enum_boards(struct board *b, struct soln_ll_node **last, int depth);
 static void assign_var_mask(struct board *b, int var, int val, bool *mask);
 static void update_asgmt(struct board *b);
 static bool is_solved(struct board *b, bool *mask);
 static int tree_search(struct board *b, bool *m_in, int var, int val, int depth, double *rd);
 static void assign_var_doms(struct board *b, int var, int val);
 static void incorp_dom(struct board *b, int var, uint32_t *c);
-static int soln_ll_append(int *s, struct soln_elem **last);
+static int soln_ll_append(int *s, struct soln_ll_node **last);
 static int score(struct board *b, bool *mask);
 static double ht_get(struct board *b, bool *mask);
-static int ht_put(struct board *b, bool *mask, double exp_val);
+static int ht_put(struct board *b, bool *mask, double qval);
 static void ht_free(struct board *b);
 static uint32_t get_bucket(struct board *b, bool *mask);
 static void print_assigns(struct board *b);
@@ -252,12 +252,12 @@ int main()
 	int cs[] = {2, 7, 5, 8, 4};
 	int cv[] = {3, 1, 2, 1, 3};
 #endif
-	/* Computationally hard board. */
-	int rs[] = {3, 4, 4, 7, 6};
-	int rv[] = {2, 2, 1, 1, 0};
-	int cs[] = {7, 5, 4, 5, 3};
-	int cv[] = {0, 0, 2, 1, 3};
+	int rs[] = {8, 2, 9, 3, 3};
+	int rv[] = {1, 3, 1, 2, 3};
+	int cs[] = {7, 6, 6, 1, 5};
+	int cv[] = {2, 1, 1, 4, 2};
 
+	/* Initiate and solve the board. */
 	init_board(b, rs, rv, cs, cv);
 	errno = solve_board(b);
 	if (errno) {
@@ -265,11 +265,8 @@ int main()
 		printf("\nBoard state at failure:\n");
 		print_assigns(b);
 	}
-#if LOG
-	printf("Total htable hits: %d.\n", b->hits);
-	printf("Total table entries: %d.\n", b->elems);
-	printf("Longest LL: %d entries.\n", b->max_len);
-#endif
+
+	/* Free the board's resources. */
 	ht_free(b);
 	free(b->mask);
 	free(b->solns);
@@ -280,7 +277,7 @@ int main()
 static void init_board(struct board *b, int *rs, int *rv, int *cs, int *cv)
 {
 	int i, *asgmt = b->assigns;
-	uint32_t *dom = b->domains;
+	uint32_t *doms = b->domains;
 	struct htable_bucket *ht = b->htable;
 
 	/* Copy over all the constraints. */
@@ -292,7 +289,7 @@ static void init_board(struct board *b, int *rs, int *rv, int *cs, int *cv)
 	/* Domains of all variables
 	   unconstrained and unassigned. */
 	for (i = 0; i < 25; i++) {
-		dom[i] = ALL_VALS;
+		doms[i] = ALL_VALS;
 		asgmt[i] = -1;
 	}
 
@@ -301,8 +298,8 @@ static void init_board(struct board *b, int *rs, int *rv, int *cs, int *cv)
 	memset(b->col_asgmt, 0, 5 * sizeof(int));
 
 	/* No partition constraints have been enforced... */
-	memset(b->row_cons, 0, 5 * sizeof(bool));
-	memset(b->col_cons, 0, 5 * sizeof(bool));
+	memset(b->row_pcons, 0, 5 * sizeof(bool));
+	memset(b->col_pcons, 0, 5 * sizeof(bool));
 
 	/* And no vars have been arc enforced. */
 	memset(b->row_arc, 0, 25 * sizeof(bool));
@@ -318,10 +315,6 @@ static void init_board(struct board *b, int *rs, int *rv, int *cs, int *cv)
 		ht[i].head = NULL;
 		ht[i].tail = NULL;
 	}
-
-	b->hits = 0;
-	b->max_len = 0;
-	memset(b->bucket_lens, 0, HT_BUCKETS * sizeof(int));
 }
 
 /* Solves a board that has been initialized.
@@ -344,7 +337,7 @@ static void init_board(struct board *b, int *rs, int *rv, int *cs, int *cv)
 	randomly decides the value of that tile from a distribution that can easily
 	be recovered from the list of boards.
 
-	Simply do recursive tree search to find the expected value of each action the
+	Simply do recursive tree search to find the Q-val of each action the
 	player can take, and choose the best. If the game is over (through winning,
 	losing, or quitting), we're done. Otherwise, go back to step 2. */
 static int solve_board(struct board *b)
@@ -400,7 +393,7 @@ static int solve_board(struct board *b)
 		if (pfree_mask(b))
 			continue;
 
-		/* Prompt the user to reveal a tile. */
+		/* Prompt the user to take the best action. */
 		errno = pbest_act(b, &cont);
 		if (errno) {
 			free(b->solns);
@@ -427,10 +420,10 @@ static int enf_part(struct board *b, bool *rd)
 	for (i = 0; i < 5; i++) {
 
 		/* If the row has already been enforced, skip it. */
-		if (b->row_cons[i])
+		if (b->row_pcons[i])
 			continue;
 
-		b->row_cons[i] = true;
+		b->row_pcons[i] = true;
 
 		/* Look up the constraints on the variables. */
 		errno = row_part_cons(b, i, &cons);
@@ -463,10 +456,10 @@ static int enf_part(struct board *b, bool *rd)
 	for (i = 0; i < 5; i++) {
 
 		/* If the col has already been enforced, skip it. */
-		if (b->col_cons[i])
+		if (b->col_pcons[i])
 			continue;
 
-		b->col_cons[i] = true;
+		b->col_pcons[i] = true;
 
 		/* Look up the constraints on the variables. */
 		errno = col_part_cons(b, i, &cons);
@@ -526,6 +519,8 @@ static bool enf_arcs(struct board *b)
 
 			/* Otherwise, check that this assignment
 			   is arc consistent for rows, cols, or both. */
+			/* TODO */
+			/* Cache row/col doms. */
 			if ((!b->row_arc[i] && !check_row_arc(b, i, j)) ||
 					(!b->col_arc[i] && !check_col_arc(b, i, j)))
 				dom = RESET_BIT(dom, j);
@@ -597,8 +592,8 @@ static bool pfree_doms(struct board *b)
 /* Stores all the possible solutions to a board in its solns array. */
 static int enum_boards(struct board *b)
 {
-	int errno, i, num, *solns;
-	struct soln_elem ll_sent, *soln_iter, *soln_next, *last;
+	int errno, i, len, *solns;
+	struct soln_ll_node ll_sent, *soln_iter, *soln_next, *last;
 	bool *mask;
 
 	/* Initialize the linked list sentinel node. */
@@ -607,10 +602,10 @@ static int enum_boards(struct board *b)
 
 	/* Populates the linked list with all solutions to b. */
 	errno = r_enum_boards(b, &last, 1);
-	num = b->solns_len;
+	len = b->solns_len;
 	if (errno) {
 		/* Free whatever portions of the LL we allocated. */
-		for (i = 0, soln_iter = ll_sent.next; i < num; i++, soln_iter = soln_next) {
+		for (i = 0, soln_iter = ll_sent.next; i < len; i++, soln_iter = soln_next) {
 			soln_next = soln_iter->next;
 			free(soln_iter);
 		}
@@ -620,10 +615,10 @@ static int enum_boards(struct board *b)
 	}
 
 	/* Malloc the (usually large) set of solutions and their mask. */
-	solns = malloc(25 * num * sizeof(int));
+	solns = malloc(25 * len * sizeof(int));
 	if (!solns) {
 		/* Free the linked list. */
-		for (i = 0, soln_iter = ll_sent.next; i < num; i++, soln_iter = soln_next) {
+		for (i = 0, soln_iter = ll_sent.next; i < len; i++, soln_iter = soln_next) {
 			soln_next = soln_iter->next;
 			free(soln_iter);
 		}
@@ -632,10 +627,10 @@ static int enum_boards(struct board *b)
 		return OOM;
 	}
 
-	mask = malloc(num * sizeof(bool));
+	mask = malloc(len * sizeof(bool));
 	if (!mask) {
 		/* Free the linked list. */
-		for (i = 0, soln_iter = ll_sent.next; i < num; i++, soln_iter = soln_next) {
+		for (i = 0, soln_iter = ll_sent.next; i < len; i++, soln_iter = soln_next) {
 			soln_next = soln_iter->next;
 			free(soln_iter);
 		}
@@ -646,11 +641,11 @@ static int enum_boards(struct board *b)
 	}
 
 	/* Set the mask to all false. */
-	memset(mask, 0, num * sizeof(bool));
+	memset(mask, 0, len * sizeof(bool));
 
 	/* Populates the new solns array with the contents of the
 	   linked list, and simultaneously frees the linked list. */
-	for (i = 0, soln_iter = ll_sent.next; i < num; i++, soln_iter = soln_next) {
+	for (i = 0, soln_iter = ll_sent.next; i < len; i++, soln_iter = soln_next) {
 
 		/* Copy the contents of the LL element into the global array... */
 		memcpy(solns + 25 * i, soln_iter->assigns, 25 * sizeof(int));
@@ -669,7 +664,7 @@ static int enum_boards(struct board *b)
    of every variable given a mask for the board b. */
 static void populate_probs(struct board *b, bool *mask, double *probs)
 {
-	int i, j, len = b->solns_len, rem = 0, *solns = b->solns;
+	int i, j, rem = 0, len = b->solns_len, *solns = b->solns;
 
 	/* Clear out the probabilities info... */
 	memset(probs, 0, 100 * sizeof(double));
@@ -772,7 +767,8 @@ static bool pfree_mask(struct board *b)
 static int pbest_act(struct board *b, bool *rd)
 {
 	int errno, i, input, best_a, *asgmt = b->assigns;
-	double best = -1.0, best_pzero = 1.1, cand, p_one, p_two, p_three, sub_val, *probs = b->probs;
+	double best = -1.0, best_pzero = 1.1, cand, sub_val,
+	       p_one, p_two, p_three, *probs = b->probs;
 	uint32_t dom = 0;
 #if LOG
 	int j;
@@ -787,7 +783,7 @@ static int pbest_act(struct board *b, bool *rd)
 	}
 
 	/* Otherwise, find the next action. First, compute the
-	   expected values of revealing all the unknown tiles. */
+	   Q-vals of revealing all the unknown tiles. */
 	for (i = 0; i < 25; i++) {
 #if LOG
 		q_vals[i] = 0.0;
@@ -799,14 +795,14 @@ static int pbest_act(struct board *b, bool *rd)
 #if LOG
 		printf("Assigning var %d.\n\n", i);
 #endif
-		/* Otherwise, calculate its expected value. */
+		/* Otherwise, calculate its Q-val. */
 		cand = 0;
 		p_one = PROB(probs, i, 1);
 		p_two = PROB(probs, i, 2);
 		p_three = PROB(probs, i, 3);
 
 		/* If the probability of a certain value is > 0.0, add the value of
-		   the subtree multiplied by its probability to the expected value
+		   the subtree multiplied by its probability to the Q-val
 		   of the action. Note that 0 always results in 0, so we can skip it. */
 		if (p_one > 0.0) {
 			errno = tree_search(b, b->mask, i, 1, 1, &sub_val);
@@ -867,6 +863,7 @@ static int pbest_act(struct board *b, bool *rd)
 		return 0;
 	}
 
+	/* Otherwise, prompt the user to reveal the best tile. */
 	printf("\n##################################\n");
 	print_prompt(b, best_a);
 	printf("The next best action is tile %d. What is its value? It is one of: ", best_a);
@@ -1141,7 +1138,7 @@ static bool check_col_arc(struct board *b, int var, int val)
 /* Populates the given linked list with all solutions that satisfy
    the board's constraints using backtracking search with arc
    consistency. Assumes it's passed an already arc-reduced board. */
-static int r_enum_boards(struct board *b, struct soln_elem **last, int depth)
+static int r_enum_boards(struct board *b, struct soln_ll_node **last, int depth)
 {
 	int errno, i, j, asgmts[25], card, min_card = 5, min_asgmt = -1;
 	uint32_t doms[25], dom;
@@ -1319,7 +1316,7 @@ static bool is_solved(struct board *b, bool *mask)
 }
 
 /* Say we have a board defined by b and m_in. This function either
-   returns the expected value of the best action, or, if the board is
+   returns the Q-val of the best action, or, if the board is
    solved (or we've hit MAX_DEPTH), the evaluation of the board. */
 static int tree_search(struct board *b, bool *m_in, int var, int val, int depth, double *rd)
 {
@@ -1327,6 +1324,8 @@ static int tree_search(struct board *b, bool *m_in, int var, int val, int depth,
 	double rv = -1.0, cand, p_one, p_two, p_three, sub_val, probs[100];
 	bool *mask = malloc(len * sizeof(bool));
 #if LOG
+	/* Used to indent LOG statements
+	   to the correct depth. */
 	int _;
 #endif
 	if (!mask) {
@@ -1402,14 +1401,14 @@ static int tree_search(struct board *b, bool *m_in, int var, int val, int depth,
 			printf("\t");
 		printf("Assigning var %d.\n\n", i);
 #endif
-		/* Otherwise, calculate its expected value. */
+		/* Otherwise, calculate its Q-val. */
 		cand = 0;
 		p_one = PROB(probs, i, 1);
 		p_two = PROB(probs, i, 2);
 		p_three = PROB(probs, i, 3);
 
 		/* If the probability of a certain value is > 0.0, add the value of
-		   the subtree multiplied by its probability to the expected value
+		   the subtree multiplied by its probability to the Q-val
 		   of the action. Note that 0 always results in 0, so we can skip it. */
 		if (p_one > 0.0) {
 			errno = tree_search(b, mask, i, 1, depth + 1, &sub_val);
@@ -1450,7 +1449,7 @@ static int tree_search(struct board *b, bool *m_in, int var, int val, int depth,
 			printf("\t");
 		printf("Value of clicking on %d at depth %d is %01.02f.\n\n", i, depth, cand);
 #endif
-		/* If the expected value for this action is the best we've found so far, remember it. */
+		/* If the Q-val for this action is the best we've found so far, remember it. */
 		if (cand > rv)
 			rv = cand;
 	}
@@ -1476,11 +1475,15 @@ static int tree_search(struct board *b, bool *m_in, int var, int val, int depth,
    Also ensures we no longer check it for arc consistency. */
 static void assign_var_doms(struct board *b, int var, int val)
 {
+	/* Update assigns... */
 	b->assigns[var] = val;
 
-	b->row_cons[ROW(var)] = (++(b->row_asgmt[ROW(var)]) != 5) ? false : true;
-	b->col_cons[COL(var)] = (++(b->col_asgmt[COL(var)]) != 5) ? false : true;
+	/* Invalidate the row/col partition constraints, unless all the variables
+	   in the row/col have been assigned already... */
+	b->row_pcons[ROW(var)] = (++(b->row_asgmt[ROW(var)]) != 5) ? false : true;
+	b->col_pcons[COL(var)] = (++(b->col_asgmt[COL(var)]) != 5) ? false : true;
 
+	/* And ensure we no longer check arc consistency for this variable. */
 	b->row_arc[var] = true;
 	b->col_arc[var] = true;
 }
@@ -1555,9 +1558,9 @@ static void incorp_dom(struct board *b, int var, uint32_t *c)
 
 /* Adds a new solution to the linked list whose tail
    is in **last. Spawns an error if allocation fails. */
-static int soln_ll_append(int *s, struct soln_elem **last)
+static int soln_ll_append(int *sol, struct soln_ll_node **last)
 {
-	struct soln_elem *new_soln = malloc(sizeof(struct soln_elem));
+	struct soln_ll_node *new_soln = malloc(sizeof(struct soln_ll_node));
 	if (!new_soln) {
 		printf("ERROR: Failed to allocate linked-list element: %d.\n", __LINE__);
 		return OOM;
@@ -1565,7 +1568,7 @@ static int soln_ll_append(int *s, struct soln_elem **last)
 
 	/* Set up the new tail of the list. */
 	new_soln->next = NULL;
-	memcpy(new_soln->assigns, s, 25 * sizeof(int));
+	memcpy(new_soln->assigns, sol, 25 * sizeof(int));
 
 	/* Update the prior last element and point last at the new tail. */
 	(*last)->next = new_soln;
@@ -1615,7 +1618,7 @@ static int score(struct board *b, bool *mask)
 static double ht_get(struct board *b, bool *mask)
 {
 	int i, len = b->solns_len;
-	struct cached_exp_val *curr;
+	struct cached_qval *curr;
 	bool *cached_mask;
 
 	/* Iterate through the correct bucket. If a key matches the mask,
@@ -1628,23 +1631,23 @@ static double ht_get(struct board *b, bool *mask)
 		}
 
 		/* If the mask matches the key, we have a hit! */
-		if (i == len) {
-			b->hits++;
+		if (i == len)
 			return curr->val;
-		}
 	}
 
+	/* If we don't find it, return HT_NOT_FOUND */
 	return HT_NOT_FOUND;
 }
 
-/* Puts a mask->exp_val pair into the correct bucket of the hash table. */
-static int ht_put(struct board *b, bool *mask, double exp_val)
+/* Puts a mask->qval pair into the correct bucket of the hash table. */
+static int ht_put(struct board *b, bool *mask, double qval)
 {
 	int len = b->solns_len;
 	uint32_t i = get_bucket(b, mask);
 	struct htable_bucket *sent = &(b->htable[i]);
-	struct cached_exp_val *tail = sent->tail, *new = malloc(sizeof(struct cached_exp_val));
+	struct cached_qval *tail = sent->tail, *new = malloc(sizeof(struct cached_qval));
 
+	/* Allocate space for the new ht entry. */
 	if (!new) {
 		printf("ERROR: Failed to malloc a new hashtable entry: %d.\n", __LINE__);
 		return OOM;
@@ -1657,14 +1660,9 @@ static int ht_put(struct board *b, bool *mask, double exp_val)
 		return OOM;
 	}
 
-	/* Update our bookkeeping for lengths of lls. */
-	b->elems++;
-	if (++(b->bucket_lens[i]) > b->max_len)
-		b->max_len = b->bucket_lens[i];
-
 	/* Populate the new entry. */
 	memcpy(new->key, mask, len * sizeof(bool));
-	new->val = exp_val;
+	new->val = qval;
 	new->next = NULL;
 
 	/* Update the tail of the bucket. */
@@ -1685,8 +1683,10 @@ static int ht_put(struct board *b, bool *mask, double exp_val)
 static void ht_free(struct board *b)
 {
 	int i;
-	struct cached_exp_val *curr, *next;
+	struct cached_qval *curr, *next;
 
+	/* For every bucket, iterate through its
+	   list, freeing elements as we go. */
 	for (i = 0; i < HT_BUCKETS; i++) {
 		for (curr = b->htable[i].head; curr; curr = next) {
 			next = curr->next;
@@ -1702,6 +1702,8 @@ static uint32_t get_bucket(struct board *b, bool *mask)
 	int i, j, len = b->solns_len;
 	uint32_t rv = 5381U, temp;
 
+	/* Construct a byte from 8 consecutive bools. Then,
+	   add it to 32 times the current ongoing hash. */
 	for (i = 0; i < len - 8; i += 8) {
 		temp = (mask[i] ? 1U : 0) |
 			(mask[i + 1] ? 2U : 0) |
@@ -1715,6 +1717,7 @@ static uint32_t get_bucket(struct board *b, bool *mask)
 		rv = (rv << 5) + rv + temp;
 	}
 
+	/* Deal with the tail of the list. */
 	temp = 0;
 	for (j = 0; i < len; i++, j++)
 		temp |= (mask[i] ? 1 << j : 0);
@@ -1726,9 +1729,11 @@ static uint32_t get_bucket(struct board *b, bool *mask)
    known variable assignments for  a board. */
 static void print_assigns(struct board *b)
 {
-	int i, j, *asgmt = b->assigns, *rs = b->row_sums, *rv = b->row_volts,
+	int i, j, *asgmt = b->assigns,
+	    *rs = b->row_sums, *rv = b->row_volts,
 	    *cs = b->col_sums, *cv = b->col_volts;
 
+	/* Print out the assignments in a grid. */
 	printf("\nAssignments:\n\n");
 	for (i = 0; i < 5; i++) {
 
@@ -1742,21 +1747,27 @@ static void print_assigns(struct board *b)
 				printf(" %d ", asgmt[VAR(i, j)]);
 		}
 
+		/* Add the row constraints to the end. */
 		printf("   %02d\n                  %d\n\n", rs[i], rv[i]);
 	}
 
+	/* Finally, print the col constraints at the bottom of the grid. */
 	printf("%02d %02d %02d %02d %02d\n %d  %d  %d  %d  %d\n\n",
 			cs[0], cs[1], cs[2], cs[3], cs[4],
 			cv[0], cv[1], cv[2], cv[3], cv[4]);
 }
 
-/* Does the same thing as print_assigns, but with a convenient
-   ? instead of an X for the given tile. */
+/* Does the same thing as print_assigns, but with a
+   convenient ? instead of an X for the given tile.
+   Exactly the same as the above function, except
+   for printing a ? in the prompted variable. */
 static void print_prompt(struct board *b, int x)
 {
-	int i, j, *asgmt = b->assigns, *rs = b->row_sums, *rv = b->row_volts,
+	int i, j, *asgmt = b->assigns,
+	    *rs = b->row_sums, *rv = b->row_volts,
 	    *cs = b->col_sums, *cv = b->col_volts;
 
+	/* Print out the assignments in a grid. */
 	printf("\nAssignments:\n\n");
 	for (i = 0; i < 5; i++) {
 
@@ -1775,9 +1786,11 @@ static void print_prompt(struct board *b, int x)
 				printf(" %d ", asgmt[VAR(i, j)]);
 		}
 
+		/* Add the row constraints to the end. */
 		printf("   %02d\n                  %d\n\n", rs[i], rv[i]);
 	}
 
+	/* Finally, print the col constraints at the bottom of the grid. */
 	printf("%02d %02d %02d %02d %02d\n %d  %d  %d  %d  %d\n\n",
 			cs[0], cs[1], cs[2], cs[3], cs[4],
 			cv[0], cv[1], cv[2], cv[3], cv[4]);
@@ -1786,11 +1799,16 @@ static void print_prompt(struct board *b, int x)
 /* Prints out a helpful message corresponding to an error code. */
 static void print_error(enum errs code)
 {
+	/* Note that since we're switching on an
+	   enum, we're guaranteed by the compiler
+	   to always cover every case. */
 	switch (code) {
+
 	/* Debug codes. */
 	case NOT_YET_IMP:
 		printf("Not yet implemented.\n");
 		break;
+
 	/* Runtime error codes. */
 	case BAD_ARGS:
 		printf("Bad arguments.\n");
@@ -1811,6 +1829,7 @@ static void print_doms(struct board *b)
 
 	uint32_t *doms = b->domains;
 
+	/* Print out the domains in a grid. */
 	printf("\nDomains:\n\n");
 	for (i = 0; i < 5; i++) {
 
@@ -1818,9 +1837,11 @@ static void print_doms(struct board *b)
 		for (j = 0; j < 5; j++)
 			printf(" %u ", doms[VAR(i, j)]);
 
+		/* Add the row constraints to the end. */
 		printf("   %02d\n                  %d\n\n", rs[i], rv[i]);
 	}
 
+	/* Finally, print the col constraints at the bottom of the grid. */
 	printf("%02d %02d %02d %02d %02d\n %d  %d  %d  %d  %d\n\n",
 			cs[0], cs[1], cs[2], cs[3], cs[4],
 			cv[0], cv[1], cv[2], cv[3], cv[4]);
@@ -1842,6 +1863,7 @@ static void print_solns(struct board *b)
 		return;
 	}
 
+	/* Print out the grid for every valid board in solns. */
 	for (i = 0; i < len; i++) {
 
 		/* If it's no longer valid, skip it. */
@@ -1858,14 +1880,17 @@ static void print_solns(struct board *b)
 			for (k = 0; k < 5; k++)
 				printf(" %u ", SOLN_ASGMT(solns, i, VAR(j, k)));
 
+			/* Add the row constraints to the end. */
 			printf("   %02d\n                  %d\n\n", rs[j], rv[j]);
 		}
 
+		/* Finally, print the col constraints at the bottom of the grid. */
 		printf("%02d %02d %02d %02d %02d\n %d  %d  %d  %d  %d\n\n",
 				cs[0], cs[1], cs[2], cs[3], cs[4],
 				cv[0], cv[1], cv[2], cv[3], cv[4]);
 	}
 
+	/* Finally, print the size of the underlying array and the number of remaining solutions. */
 	printf("\nSize of underlying array: 25 * %d = %d\nRemaining solutions: %d\n\n", len, 25 * len, rem);
 }
 
@@ -1875,6 +1900,7 @@ static void print_probs(double *probs)
 {
 	int i, j;
 
+	/* For every variable... */
 	for (i = 0; i < 25; i++) {
 
 		/* If the variable's value is certain, skip it. */
